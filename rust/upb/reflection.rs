@@ -5,18 +5,21 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
+use core::ffi::{c_int, CStr};
 use core::marker::PhantomData;
 
 use reflection::def_pool::{
-    upb_DefPool_FindMessageByNameWithSize, upb_DefPool_Free, upb_DefPool_LoadDefInit,
-    upb_DefPool_New, RawDefPool,
+    upb_DefPool_FindMessageByNameWithSize, upb_DefPool_Free, upb_DefPool_Init_New,
+    upb_DefPool_LoadDefInit, upb_DefPool_New, upb_MiniTableFile_New, RawDefPool,
 };
 use reflection::message_def::RawMessageDef;
 use reflection::upb_TextEncode;
 
-use upb::MessagePtr;
+use upb::{Arena, MessagePtr, RawMiniTable, RawMiniTableEnum, RawMiniTableExtension, StringView};
 
 pub use reflection::def_pool::upb_DefPool_Init;
+pub use reflection::def_pool::RawDefPoolInit as DefPoolInitPtr;
+pub use reflection::def_pool::RawMiniTableFile as MiniTableFilePtr;
 
 /// A wrapper over a `upb_DefPool`.
 ///
@@ -44,8 +47,8 @@ impl DefPool {
     /// Loads a generated descriptor, and everything it imports, into the pool.
     ///
     /// # Safety
-    /// - `init` must point to a valid `upb_DefPool_Init`, and so must every init reachable from
-    ///   it through its dependencies according to the correct orderings and counts.
+    /// - `init` must point to a valid `upb_DefPool_Init`, and so must every init reachable from it
+    ///   through its dependencies according to the correct orderings and counts.
     pub unsafe fn load_def_init(&mut self, init: *const upb_DefPool_Init) -> bool {
         // SAFETY:
         // - `self.raw` is a live pool; only `Drop` frees it.
@@ -101,7 +104,7 @@ impl<'pool> MessageDef<'pool> {
 
     /// Returns the internal NonNull representation of the descriptor.
     #[inline]
-    pub(crate) fn raw(&self) -> RawMessageDef {
+    pub fn raw(&self) -> RawMessageDef {
         self.raw
     }
 }
@@ -146,4 +149,96 @@ pub unsafe fn text_encode<'pool, T>(
     // Drop the trailing NULL written by `upb_TextEncode`.
     buf.truncate(written_len);
     String::from_utf8_lossy(buf.as_slice()).into_owned()
+}
+
+/// Copies `data` into `arena` and returns a pointer to it, or null if `data` is empty.
+///
+/// upb accepts a null pointer whenever the matching count is zero, and `Arena::copy_slice_in`
+/// has no useful answer for a zero-length slice.
+fn copy_slice_in_or_null<T: Copy>(arena: &Arena, data: &[T]) -> *const T {
+    if data.is_empty() {
+        return core::ptr::null();
+    }
+    arena.copy_slice_in(data).expect("arena allocation failed").as_ptr()
+}
+
+/// Builds a `upb_MiniTableFile` in `arena` from the MiniTables of one .proto file.
+///
+/// upb's def builder takes these MiniTables by position as it walks the file, so each array
+/// must hold exactly the file's own entities, in the order it visits them, which is the order
+/// they are declared in:
+///
+/// - `msgs`: each message followed by its nested messages, depth first. This includes the synthetic
+///   messages generated for map fields.
+/// - `enums`: the file's closed enums, then each message's closed enums, depth first. Open enums
+///   have no MiniTable.
+/// - `exts`: the file's extensions, then each message's extensions, depth first.
+///
+/// # Safety
+/// - Every MiniTable referenced must outlive any `DefPool` the layout is loaded into, as must
+///   `arena`: upb keeps the arrays rather than copying them.
+pub unsafe fn build_mini_table_file(
+    arena: &Arena,
+    msgs: &[RawMiniTable],
+    enums: &[RawMiniTableEnum],
+    exts: &[RawMiniTableExtension],
+) -> MiniTableFilePtr {
+    let msgs_ptr = copy_slice_in_or_null(arena, msgs);
+    let enums_ptr = copy_slice_in_or_null(arena, enums);
+    let exts_ptr = copy_slice_in_or_null(arena, exts);
+
+    // SAFETY:
+    // - `arena` is live for the duration of the call.
+    // - each array is readable for the count passed alongside it, and is null only when that count
+    //   is zero.
+    unsafe {
+        upb_MiniTableFile_New(
+            arena.raw(),
+            msgs_ptr,
+            msgs.len() as c_int,
+            enums_ptr,
+            enums.len() as c_int,
+            exts_ptr,
+            exts.len() as c_int,
+        )
+    }
+    .expect("arena allocation failed")
+}
+
+/// Builds a `upb_DefPool_Init` in `arena`, ready to hand to [`DefPool::load_def_init`].
+///
+/// `filename` must be the name inside `descriptor`: the pool uses it to skip files it has
+/// already loaded. `deps` are the inits for the files `descriptor` imports; the NULL terminator
+/// upb expects is appended here. `layout` is the file's MiniTables, from
+/// [`build_mini_table_file`].
+///
+/// # Safety
+/// - `layout` and every init in `deps` must outlive any `DefPool` this init is loaded into, as must
+///   `arena`: upb keeps pointing at them rather than copying them.
+pub unsafe fn build_def_pool_init(
+    arena: &Arena,
+    filename: &'static CStr,
+    descriptor: &'static [u8],
+    deps: &[DefPoolInitPtr],
+    layout: MiniTableFilePtr,
+) -> DefPoolInitPtr {
+    let mut terminated: Vec<Option<DefPoolInitPtr>> = deps.iter().copied().map(Some).collect();
+    terminated.push(None);
+    let deps_ptr = arena.copy_slice_in(&terminated).expect("arena allocation failed").as_ptr();
+
+    // SAFETY:
+    // - `arena` is live for the duration of the call.
+    // - `filename` and `descriptor` are readable for 'static.
+    // - `deps_ptr` points at a null-terminated array. It is cast to a mutable pointer only to match
+    //   the C signature; upb never writes through it.
+    unsafe {
+        upb_DefPool_Init_New(
+            arena.raw(),
+            filename.as_ptr(),
+            StringView::from(descriptor),
+            deps_ptr as *mut Option<DefPoolInitPtr>,
+            layout.as_ptr(),
+        )
+    }
+    .expect("arena allocation failed")
 }

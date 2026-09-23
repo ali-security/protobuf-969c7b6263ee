@@ -32,15 +32,16 @@ unsafe extern "C" {
     /// Frees a upb_DefPool and all message definitions allocated within it.
     ///
     /// # Safety
-    /// - `s` must be a valid pointer to a `upb_DefPool` created by `upb_DefPool_New` that has not been freed yet.
+    /// - `s` must be a valid pointer to a `upb_DefPool` created by `upb_DefPool_New` that has not
+    ///   been freed yet.
     pub fn upb_DefPool_Free(s: RawDefPool);
 
     /// Assembles a `upb_MiniTableFile` on `arena` from the MiniTables a generated file owns.
     ///
     /// # Safety
     /// - `arena` must be a valid, live arena.
-    /// - Each array must be readable for its stated count, and a count of zero permits a
-    ///   null pointer.
+    /// - Each array must be readable for its stated count, and a count of zero permits a null
+    ///   pointer.
     pub fn upb_MiniTableFile_New(
         arena: RawArena,
         msgs: *const RawMiniTable,
@@ -76,8 +77,8 @@ unsafe extern "C" {
     /// # Safety
     /// - `s` must be a valid pointer to a `upb_DefPool` that has not been freed yet.
     /// - `init`, and every init reachable from it, must be valid and outlive this call.
-    /// - Any layout the init carries must match its descriptor in correct counts. The
-    ///   descriptors must be in the correct order.
+    /// - Any layout the init carries must match its descriptor in correct counts. The descriptors
+    ///   must be in the correct order.
     #[link_name = "_upb_DefPool_LoadDefInit"]
     pub fn upb_DefPool_LoadDefInit(s: RawDefPool, init: *const upb_DefPool_Init) -> bool;
 
