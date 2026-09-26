@@ -512,33 +512,33 @@ class PROTOBUF_EXPORT WireFormatLite {
     return WriteEnumToArray(field_number, value, target);
   }
 
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteInt32ToArray(int field_number, int32_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteInt64ToArray(int field_number, int64_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteUInt32ToArray(int field_number, uint32_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteUInt64ToArray(int field_number, uint64_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteSInt32ToArray(int field_number, int32_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteSInt64ToArray(int field_number, int64_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteFixed32ToArray(int field_number, uint32_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteFixed64ToArray(int field_number, uint64_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteSFixed32ToArray(int field_number, int32_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteSFixed64ToArray(int field_number, int64_t value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteFloatToArray(int field_number, float value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteDoubleToArray(int field_number, double value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteBoolToArray(int field_number, bool value, uint8_t* target);
-  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NDEBUG_INLINE static uint8_t*
+  PROTOBUF_FUTURE_ADD_EARLY_NODISCARD PROTOBUF_NOINLINE static uint8_t*
   WriteEnumToArray(int field_number, int value, uint8_t* target);
 
   template <typename T>
