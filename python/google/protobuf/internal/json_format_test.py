@@ -1771,6 +1771,200 @@ class JsonFormatTest(JsonFormatBase):
         '{"payload": {}, "child": {"child":{}}}', message, max_recursion_depth=3
     )
 
+  def testStructRecursionDepthEnforcement(self):
+    """Test that nested Struct messages respect max_recursion_depth limit."""
+    message = struct_pb2.Struct()
+    # With max_recursion_depth=5, we can nest up to depth 5.
+    # {"a": {"b": {"c": {}}}} will reach depth 6 when trying to parse "c" value.
+    # This is treated as 6 in our depth enforcement rather than depth 3 because
+    # it is Struct-Value-Struct-Value-Struct-Value.
+    nested_dict = {'a': {'b': {'c': {}}}}
+    self.assertRaisesRegex(
+        json_format.ParseError,
+        'Message too deep. Max recursion depth is 5',
+        json_format.ParseDict,
+        nested_dict,
+        message,
+        max_recursion_depth=5,
+    )
+
+    # This should pass as it reaches depth 5.
+    shallow_dict = {'a': {'b': {}}}
+    json_format.ParseDict(shallow_dict, message, max_recursion_depth=5)
+
+  def testListValueRecursionDepthEnforcement(self):
+    """Test that nested ListValue messages respect max_recursion_depth limit."""
+    message = struct_pb2.ListValue()
+    # [[[[]]]] is ListValue-Value-ListValue-Value-ListValue-Value, depth 6.
+    self.assertRaisesRegex(
+        json_format.ParseError,
+        'Message too deep. Max recursion depth is 5',
+        json_format.ParseDict,
+        [[[[]]]],
+        message,
+        max_recursion_depth=5,
+    )
+
+    # [[[]]] is ListValue-Value-ListValue-Value-ListValue, depth 5.
+    json_format.ParseDict([[[]]], message, max_recursion_depth=5)
+
+  def testDeeplyNestedWellKnownTypesRaiseParseError(self):
+    """Deeply nested Struct/ListValue/Any must not bypass the depth limit."""
+    num_recursions = 5000
+
+    nested_struct = {}
+    for _ in range(num_recursions):
+      nested_struct = {'a': nested_struct}
+    with self.assertRaisesRegex(
+        json_format.ParseError, 'Message too deep. Max recursion depth is 100'
+    ):
+      json_format.ParseDict(nested_struct, struct_pb2.Struct())
+
+    nested_list = []
+    for _ in range(num_recursions):
+      nested_list = [nested_list]
+    with self.assertRaisesRegex(
+        json_format.ParseError, 'Message too deep. Max recursion depth is 100'
+    ):
+      json_format.ParseDict(nested_list, struct_pb2.ListValue())
+
+    nested_value = None
+    for _ in range(num_recursions):
+      nested_value = {'a': [nested_value]}
+    with self.assertRaisesRegex(
+        json_format.ParseError, 'Message too deep. Max recursion depth is 100'
+    ):
+      json_format.ParseDict(nested_value, struct_pb2.Value())
+
+    nested_any = {}
+    for _ in range(num_recursions):
+      nested_any = {
+          '@type': 'type.googleapis.com/google.protobuf.Any',
+          'value': nested_any,
+      }
+    with self.assertRaisesRegex(
+        json_format.ParseError, 'Message too deep. Max recursion depth is 100'
+    ):
+      json_format.ParseDict(nested_any, any_pb2.Any())
+
+    # Any wrapping a Struct must also count the Struct nesting.
+    any_struct = {
+        '@type': 'type.googleapis.com/google.protobuf.Struct',
+        'value': nested_struct,
+    }
+    with self.assertRaisesRegex(
+        json_format.ParseError, 'Message too deep. Max recursion depth is 100'
+    ):
+      json_format.ParseDict(any_struct, any_pb2.Any())
+
+    # The same limit applies when going through Parse() on JSON text.
+    text = ('{"a":' * 500) + '""' + ('}' * 500)
+    with self.assertRaisesRegex(
+        json_format.ParseError, 'Message too deep. Max recursion depth is 100'
+    ):
+      json_format.Parse(text, struct_pb2.Struct())
+
+  def testAnyRecursionDepthEnforcement(self):
+    """Test that nested Any messages respect max_recursion_depth limit."""
+    # Test that deeply nested Any messages raise ParseError instead of
+    # bypassing the recursion limit. This prevents DoS via nested Any.
+    message = any_pb2.Any()
+
+    # Create nested Any structure that should exceed depth limit
+    # With max_recursion_depth=5, we can nest 4 Any messages
+    # (depth 1 = outer Any, depth 2-4 = nested Anys, depth 5 = final value)
+    nested_any = {
+        '@type': 'type.googleapis.com/google.protobuf.Any',
+        'value': {
+            '@type': 'type.googleapis.com/google.protobuf.Any',
+            'value': {
+                '@type': 'type.googleapis.com/google.protobuf.Any',
+                'value': {
+                    '@type': 'type.googleapis.com/google.protobuf.Any',
+                    'value': {
+                        '@type': 'type.googleapis.com/google.protobuf.Any',
+                        'value': {},
+                    },
+                },
+            },
+        },
+    }
+
+    # Should raise ParseError due to exceeding max depth, not RecursionError
+    self.assertRaisesRegex(
+        json_format.ParseError,
+        'Message too deep. Max recursion depth is 5',
+        json_format.ParseDict,
+        nested_any,
+        message,
+        max_recursion_depth=5,
+    )
+
+    # Verify that Any messages within the limit can be parsed successfully
+    # With max_recursion_depth=5, we can nest up to 4 Any messages
+    shallow_any = {
+        '@type': 'type.googleapis.com/google.protobuf.Any',
+        'value': {
+            '@type': 'type.googleapis.com/google.protobuf.Any',
+            'value': {
+                '@type': 'type.googleapis.com/google.protobuf.Any',
+                'value': {
+                    '@type': 'type.googleapis.com/google.protobuf.Any',
+                    'value': {},
+                },
+            },
+        },
+    }
+    json_format.ParseDict(shallow_any, message, max_recursion_depth=5)
+
+  def testAnyRecursionDepthBoundary(self):
+    """Test recursion depth boundary behavior (exclusive upper limit)."""
+    message = any_pb2.Any()
+
+    # Create nested Any at depth exactly 4 (should succeed with max_recursion_depth=5)
+    depth_4_any = {
+        '@type': 'type.googleapis.com/google.protobuf.Any',
+        'value': {
+            '@type': 'type.googleapis.com/google.protobuf.Any',
+            'value': {
+                '@type': 'type.googleapis.com/google.protobuf.Any',
+                'value': {
+                    '@type': 'type.googleapis.com/google.protobuf.Any',
+                    'value': {},
+                },
+            },
+        },
+    }
+    # This should succeed: depth 4 < max_recursion_depth 5
+    json_format.ParseDict(depth_4_any, message, max_recursion_depth=5)
+
+    # Create nested Any at depth exactly 5 (should fail with max_recursion_depth=5)
+    depth_5_any = {
+        '@type': 'type.googleapis.com/google.protobuf.Any',
+        'value': {
+            '@type': 'type.googleapis.com/google.protobuf.Any',
+            'value': {
+                '@type': 'type.googleapis.com/google.protobuf.Any',
+                'value': {
+                    '@type': 'type.googleapis.com/google.protobuf.Any',
+                    'value': {
+                        '@type': 'type.googleapis.com/google.protobuf.Any',
+                        'value': {},
+                    },
+                },
+            },
+        },
+    }
+    # This should fail: depth 5 == max_recursion_depth 5 (exclusive limit)
+    self.assertRaisesRegex(
+        json_format.ParseError,
+        'Message too deep. Max recursion depth is 5',
+        json_format.ParseDict,
+        depth_5_any,
+        message,
+        max_recursion_depth=5,
+    )
+
   def testJsonNameConflictSerilize(self):
     message = more_messages_pb2.ConflictJsonName(value=2)
     self.assertEqual(
