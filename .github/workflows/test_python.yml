@@ -17,6 +17,32 @@ on:
         description: "The string continuous-only tests should be prefixed with when displaying test
           results."
         type: string
+  # Manual entry point for the fork CI: same inputs as workflow_call, with
+  # defaults, so the workflow can be dispatched on its own.
+  workflow_dispatch:
+    inputs:
+      continuous-run:
+        required: false
+        default: "continuous"
+        description: "Boolean string denoting whether this run is continuous --
+          empty string for presubmit, non-empty string for continuous."
+        type: string
+      safe-checkout:
+        required: false
+        default: ""
+        description: "The SHA key for the commit we want to run over (empty = the dispatched commit)"
+        type: string
+      continuous-prefix:
+        required: false
+        default: "[Continuous]"
+        description: "The string continuous-only tests should be prefixed with when displaying test
+          results."
+        type: string
+      test-filter:
+        required: false
+        default: ""
+        description: "Optional Bazel test target pattern(s) to run instead of the full python suite"
+        type: string
 
 
 permissions:
@@ -55,21 +81,41 @@ jobs:
             image: us-docker.pkg.dev/protobuf-build/containers/test/linux/emulation:7.6.1-aarch64-f0d1e209ed9369f69d93ce418990ecff3aa08d6f
 
     name: ${{ matrix.continuous-only && inputs.continuous-prefix || '' }} Linux ${{ matrix.type }} ${{ matrix.version }} ${{ matrix.nobzlmod && 'No Bzlmod' || '' }}
-    runs-on: ubuntu-latest
+    # The upstream test images live in a private GAR registry that needs the
+    # GAR_SERVICE_ACCOUNT secret (absent on the fork, and the images are not
+    # anonymously pullable), so run the same bazel test command directly on the
+    # runner with setup-python + bazelisk. The aarch64 leg runs natively on an
+    # ARM runner instead of the private emulation image; it passes
+    # --cpu=linux-aarch_64 (the cpu value that image builds with) because
+    # //build_defs:aarch64, which gates //python:aarch64_test, matches only that
+    # value while a native ARM host reports cpu "aarch64".
+    runs-on: ${{ matrix.version == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 120
     steps:
       - name: Checkout pending changes
         if: ${{ !matrix.continuous-only || inputs.continuous-run }}
         uses: protocolbuffers/protobuf-ci/checkout@v4
         with:
-          ref: ${{ inputs.safe-checkout }}
+          ref: ${{ inputs.safe-checkout || github.sha }}
+      - name: Pin Python version
+        if: ${{ !matrix.continuous-only || inputs.continuous-run }}
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f #v5.1.1
+        with:
+          python-version: ${{ matrix.version == 'aarch64' && '3.12' || matrix.version }}
+      - name: Install bazelisk
+        if: ${{ !matrix.continuous-only || inputs.continuous-run }}
+        run: |
+          set -e
+          sudo curl -fsSL -o /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-${{ matrix.version == 'aarch64' && 'linux-arm64' || 'linux-amd64' }}
+          sudo chmod +x /usr/local/bin/bazel
       - name: Run tests
         if: ${{ !matrix.continuous-only || inputs.continuous-run }}
-        uses: protocolbuffers/protobuf-ci/bazel-docker@v4
-        with:
-          image: ${{ matrix.image || format('us-docker.pkg.dev/protobuf-build/containers/test/linux/python:7.6.1-{0}-e1c2fe666ffa9b941b126541a26340d0ea787cea', matrix.version) }}
-          credentials: ${{ secrets.GAR_SERVICE_ACCOUNT }}
-          bazel-cache: python_linux/${{ matrix.type }}_${{ matrix.version }}
-          bazel: test ${{ matrix.targets }} ${{ matrix.flags }} ${{ matrix.nobzlmod && '--noenable_bzlmod' || '' }} --test_env=KOKORO_PYTHON_VERSION
+        env:
+          KOKORO_PYTHON_VERSION: ${{ matrix.version == 'aarch64' && '3.12' || matrix.version }}
+        run: >-
+          bazel test ${{ inputs.test-filter || matrix.targets }} ${{ matrix.flags }} ${{ matrix.nobzlmod && '--noenable_bzlmod' || '' }} --test_env=KOKORO_PYTHON_VERSION
+          --test_output=errors
+          ${{ matrix.version == 'aarch64' && '--cpu=linux-aarch_64' || '' }}
 
 
   macos:
@@ -88,12 +134,14 @@ jobs:
             continuous-only: true
 
     name: MacOS ${{ matrix.type }} ${{ matrix.version }}
-    runs-on: macos-13
+    # macos-13 is retired; macos-15-intel is the remaining x86_64 macOS runner.
+    runs-on: macos-15-intel
+    timeout-minutes: 120
     steps:
       - name: Checkout pending changes
         uses: protocolbuffers/protobuf-ci/checkout@v4
         with:
-          ref: ${{ inputs.safe-checkout }}
+          ref: ${{ inputs.safe-checkout || github.sha }}
 
       - name: Pin Python version
         uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f #v5.1.1
@@ -110,15 +158,328 @@ jobs:
           python3 -m venv venv
           source venv/bin/activate
 
+      # protocolbuffers/protobuf-ci/bazel authenticates to GAR with the
+      # GAR_SERVICE_ACCOUNT secret, which the fork lacks; run the same bazel
+      # test command via bazelisk (version from .bazeliskrc).
+      - name: Install bazelisk
+        run: |
+          set -e
+          sudo curl -fsSL -o /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-darwin-amd64
+          sudo chmod +x /usr/local/bin/bazel
+
       - name: Run tests
-        uses: protocolbuffers/protobuf-ci/bazel@v4
         env:
           KOKORO_PYTHON_VERSION: ${{ matrix.version }}
+        run: >-
+          bazel test ${{ inputs.test-filter || matrix.targets }} ${{ matrix.flags }}
+          --test_env=KOKORO_PYTHON_VERSION=${{ matrix.version }}
+          --macos_minimum_os=11.0
+          --test_output=errors
+
+  # ---------------------------------------------------------------------------
+  # Release artifacts. Upstream builds the published wheels in a private
+  # release container (see test_upb.yml build_wheels), which the fork cannot
+  # pull, so each job below recreates the toolchain that container provides and
+  # builds ONE public artifact with the upstream bazel targets and configs.
+  # ---------------------------------------------------------------------------
+
+  linux-wheel:
+    # Built through the upstream release toolchain (//toolchain:clang_suite via
+    # --config=linux-<arch> in toolchain/toolchains.bazelrc), which expects
+    # clang at /usr/local/bin and a manylinux2014 sysroot at
+    # /opt/manylinux/2014/<arch>. The sysroot is exported from the public
+    # quay.io/pypa/manylinux2014_<arch> image. x86_64 and aarch64 build on a
+    # native runner and also run the python test suite there; s390x has no
+    # runner (and bazel no s390x binary), so it cross-compiles on x86_64.
+    name: Wheel manylinux2014 ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            bazel_config: linux-x86_64
+            bazelisk: linux-amd64
+            extra_packages: ""
+            run_tests: true
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            bazel_config: linux-aarch_64
+            bazelisk: linux-arm64
+            extra_packages: ""
+            run_tests: true
+          - arch: s390x
+            runner: ubuntu-24.04
+            platform: linux/s390x
+            bazel_config: linux-s390_64
+            bazelisk: linux-amd64
+            extra_packages: binutils-s390x-linux-gnu
+            run_tests: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout pending changes
+        uses: actions/checkout@v4
         with:
-          version: 7.6.1 # Bazel version
-          credentials: ${{ secrets.GAR_SERVICE_ACCOUNT }}
-          bazel-cache: python_macos/${{ matrix.type }}_${{ matrix.version }}
-          bazel: >-
-            test ${{ matrix.targets }} ${{ matrix.flags }}
-            --test_env=KOKORO_PYTHON_VERSION=${{ matrix.version }}
-            --macos_minimum_os=11.0
+          ref: ${{ inputs.safe-checkout || github.sha }}
+      - name: Install bazelisk
+        run: |
+          set -e
+          curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-${{ matrix.bazelisk }} \
+            -o "$RUNNER_TEMP/bazel"
+          chmod +x "$RUNNER_TEMP/bazel"
+      - name: Run python tests
+        if: ${{ matrix.run_tests }}
+        run: |
+          set -e
+          python3 --version
+          "$RUNNER_TEMP/bazel" test ${{ inputs.test-filter || '//python/...' }} --test_output=errors
+      - name: Stage clang and the manylinux2014 ${{ matrix.arch }} sysroot
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          EXTRA_PACKAGES: ${{ matrix.extra_packages }}
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 llvm-18 $EXTRA_PACKAGES
+          # toolchain/cc_toolchain_config.bzl hardcodes /usr/local/bin/clang,
+          # /usr/local/bin/llvm-ar and the builtin include dir /usr/local/lib/clang.
+          sudo ln -sf /usr/lib/llvm-18/bin/clang /usr/local/bin/clang
+          sudo ln -sf /usr/lib/llvm-18/bin/llvm-ar /usr/local/bin/llvm-ar
+          sudo rm -rf /usr/local/lib/clang
+          sudo cp -rL /usr/lib/llvm-18/lib/clang /usr/local/lib/clang
+          SYSROOT=/opt/manylinux/2014/$ARCH
+          sudo mkdir -p "$SYSROOT"
+          cid=$(docker create --platform "$PLATFORM" "quay.io/pypa/manylinux2014_$ARCH:2023-01-01-bd00b6b" /bin/true)
+          docker export "$cid" | sudo tar -x -C "$SYSROOT" --anchored --exclude=dev --exclude=proc --exclude=sys
+          docker rm "$cid"
+          # Absolute symlinks (e.g. s390x usr/lib/ld64.so.1 -> /lib64/ld64.so.1,
+          # named by libc.so) must resolve inside the sysroot, not on the host.
+          find "$SYSROOT/usr/lib" "$SYSROOT/usr/lib64" -maxdepth 1 -type l -lname '/*' | while read -r l; do
+            sudo ln -sfn "$SYSROOT$(readlink "$l")" "$l"
+          done
+          DTS=$(find "$SYSROOT/opt/rh" -maxdepth 1 -name 'devtoolset-*' | sort -V | tail -1)
+          # The toolchain passes -isystem <sysroot>, i.e. it expects the
+          # devtoolset C++ headers flattened at the sysroot root.
+          CXXINC=$(find "$DTS/root/usr/include/c++" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          sudo cp -a "$CXXINC/." "$SYSROOT/"
+          sudo cp -a "$CXXINC/$ARCH-redhat-linux/." "$SYSROOT/"
+          # ld only searches the sysroot lib dirs: publish crtbeginS.o, libgcc
+          # and the devtoolset libstdc++ linker script there.
+          GCCLIB=$(dirname "$(find "$DTS/root/usr/lib/gcc" -name crtbeginS.o | head -1)")
+          for d in usr/lib64 usr/lib; do
+            sudo cp -a --update=none "$GCCLIB/." "$SYSROOT/$d/"
+            sudo cp -a --update=none "$DTS/root/usr/lib64/." "$SYSROOT/$d/"
+          done
+          test -e "$SYSROOT/bits/c++config.h"
+          test -e "$SYSROOT/usr/lib64/crtbeginS.o"
+          test -e "$SYSROOT/usr/lib64/libstdc++.so"
+      - name: Build manylinux2014_${{ matrix.arch }} wheel
+        run: |
+          set -e
+          # --config=linux-<arch> = cross_config (clang_suite, --//toolchain:release=true)
+          # + --cpu, which selects the manylinux2014 platform tag; the python
+          # flags select the cp39-abi3 limited-API build the release publishes.
+          "$RUNNER_TEMP/bazel" --bazelrc=toolchain/toolchains.bazelrc build //python/dist:binary_wheel \
+            -c opt \
+            --config=${{ matrix.bazel_config }} \
+            --//python:python_version=39 \
+            --//python:limited_api=True
+          mkdir -p wheels
+          cp bazel-bin/python/dist/protobuf-*-manylinux2014_${{ matrix.arch }}.whl wheels/
+          ls -l wheels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-manylinux2014-${{ matrix.arch }}
+          path: wheels/
+          if-no-files-found: error
+
+  windows-wheel:
+    # Cross-compiled from Linux with mingw-w64 through the upstream
+    # --config=win32/win64 toolchain (toolchain/BUILD.bazel hardcodes the
+    # mingw-w64 gcc 10-posix paths that Ubuntu 22.04 ships).
+    name: Wheel ${{ matrix.tag }} (cross-compiled)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: cp39-cp39-win32
+            bazel_config: win32
+            python_version: "39"
+            limited_api: "False"
+          - tag: cp39-cp39-win_amd64
+            bazel_config: win64
+            python_version: "39"
+            limited_api: "False"
+          - tag: cp310-abi3-win32
+            bazel_config: win32
+            python_version: "310"
+            limited_api: "True"
+          - tag: cp310-abi3-win_amd64
+            bazel_config: win64
+            python_version: "310"
+            limited_api: "True"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout pending changes
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.safe-checkout || github.sha }}
+      - name: Cross-compile ${{ matrix.tag }} wheel in ubuntu:22.04
+        run: |
+          set -e
+          docker run --rm \
+            -e BAZEL_CONFIG=${{ matrix.bazel_config }} \
+            -e PYTHON_VERSION=${{ matrix.python_version }} \
+            -e LIMITED_API=${{ matrix.limited_api }} \
+            -v ${{ github.workspace }}:/protobuf -w /protobuf \
+            ubuntu:22.04 bash -c '
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git unzip zip python3 python3-pip \
+                clang llvm g++ g++-mingw-w64-i686-posix g++-mingw-w64-x86-64-posix
+              curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64 \
+                -o /usr/local/bin/bazel
+              chmod +x /usr/local/bin/bazel
+              # toolchain/cc_toolchain_config.bzl hardcodes these clang paths.
+              ln -sf /usr/bin/clang /usr/local/bin/clang
+              ln -sf /usr/bin/llvm-ar /usr/local/bin/llvm-ar
+              RESOURCE_DIR=$(clang -print-resource-dir)
+              rm -rf /usr/local/lib/clang
+              mkdir -p /usr/local/lib/clang
+              cp -rL "$RESOURCE_DIR" /usr/local/lib/clang/
+              # -c opt defines NDEBUG, so assert() compiles away and the
+              # libmingwex wassert.o object (which calls MessageBoxW) is never
+              # linked. Without it the .pyd imports USER32.dll, which the
+              # public wheel does not. Keep this comment apostrophe-free: it
+              # sits inside a single-quoted docker bash -c string.
+              bazel --bazelrc=toolchain/toolchains.bazelrc build //python/dist:binary_wheel \
+                -c opt \
+                --config="$BAZEL_CONFIG" \
+                --//python:python_version="$PYTHON_VERSION" \
+                --//python:limited_api="$LIMITED_API"
+              mkdir -p wheels
+              cp bazel-bin/python/dist/protobuf-*.whl wheels/
+              ls -l wheels
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.tag }}
+          path: wheels/
+          if-no-files-found: error
+
+  macos-wheel:
+    # Upstream cross-builds universal2 through //toolchain:clang_suite
+    # (osx-aarch_64 + osx-x86_64 halves fused by llvm-lipo). An Intel runner
+    # is required: on Apple Silicon both halves come out arm64.
+    name: Wheel macosx_10_9_universal2
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - name: Checkout pending changes
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.safe-checkout || github.sha }}
+      - name: Pin Python version
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f #v5.1.1
+        with:
+          python-version: "3.12"
+      - name: Restore libarclite for old deployment targets
+        run: |
+          set -e
+          XCODE_PATH=$(xcode-select -p)
+          ARC_DIR="${XCODE_PATH}/Toolchains/XcodeDefault.xctoolchain/usr/lib/arc"
+          sudo mkdir -p "$ARC_DIR"
+          rm -rf /tmp/libarclite
+          git clone https://github.com/kamyarelyasi/Libarclite-Files.git /tmp/libarclite
+          sudo cp -R /tmp/libarclite/. "$ARC_DIR"/
+      - name: Stage clang, the macOS SDK and ld where toolchain/BUILD.bazel expects them
+        run: |
+          set -e
+          if [ -x "$(brew --prefix)/opt/llvm@18/bin/clang" ]; then
+            LLVM_PREFIX="$(brew --prefix)/opt/llvm@18"
+          else
+            brew install llvm
+            LLVM_PREFIX="$(brew --prefix llvm)"
+          fi
+          "$LLVM_PREFIX/bin/clang" --version
+          # toolchain/cc_toolchain_config.bzl hardcodes the gcc tool at
+          # /usr/local/bin/clang, the ar tool at /usr/local/bin/llvm-ar and the
+          # builtin include dir /usr/local/lib/clang.
+          sudo mkdir -p /usr/local/bin /usr/local/lib
+          sudo ln -sf "$LLVM_PREFIX/bin/clang" /usr/local/bin/clang
+          sudo ln -sf "$LLVM_PREFIX/bin/llvm-ar" /usr/local/bin/llvm-ar
+          sudo rm -rf /usr/local/lib/clang
+          sudo ln -sfn "$(dirname "$("$LLVM_PREFIX/bin/clang" -print-resource-dir)")" /usr/local/lib/clang
+          # python/dist/dist.bzl fuses the two arch slices with this exact path.
+          sudo ln -sf "$LLVM_PREFIX/bin/llvm-lipo" /usr/local/bin/llvm-lipo
+          # The osx-aarch_64 / osx-x86_64 configs compile and link against a
+          # sysroot at /usr/local/tools/xcode_14_0/macosx and pass -B/usr/local/tools,
+          # so stage the runner SDK and the linker at those paths.
+          sudo mkdir -p /usr/local/tools/xcode_14_0
+          sudo ln -sfn "$(xcrun --show-sdk-path)" /usr/local/tools/xcode_14_0/macosx
+          sudo ln -sf "$(xcrun -f ld)" /usr/local/tools/ld
+          test -e /usr/local/bin/clang
+          test -e /usr/local/bin/llvm-ar
+          test -e /usr/local/lib/clang
+          test -e /usr/local/bin/llvm-lipo
+          test -e /usr/local/tools/xcode_14_0/macosx/usr/include/c++/v1
+          test -e /usr/local/tools/xcode_14_0/macosx/usr/include
+          test -e /usr/local/tools/xcode_14_0/macosx/System/Library/Frameworks
+          test -e /usr/local/tools/ld
+      - name: Build universal2 wheel
+        run: |
+          set -e
+          curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-darwin-amd64 \
+            -o "$RUNNER_TEMP/bazel"
+          chmod +x "$RUNNER_TEMP/bazel"
+          # :dist_osx_universal2 is upstream's :dist narrowed to osx-universal2;
+          # python_version/limited_api then arrive via the py_dist transition,
+          # which is what makes the LC_ID_DYLIB output-dir hash
+          # (bazel-out/osx-*-opt-ST-7858336329b6) match the public wheel.
+          "$RUNNER_TEMP/bazel" --bazelrc=toolchain/toolchains.bazelrc build //python/dist:dist_osx_universal2 \
+            --config=cross_config \
+            -c opt \
+            --cpu=osx-universal2
+          mkdir -p wheels
+          # The py_dist transition writes the wheel to a transitioned output directory, not under bazel-bin.
+          find bazel-out/ -maxdepth 5 -name 'protobuf-*-macosx_10_9_universal2.whl' -exec cp {} wheels/ \;
+          test "$(ls wheels | wc -l)" -eq 1
+          ls -l wheels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-macosx_10_9_universal2
+          path: wheels/
+          if-no-files-found: error
+
+  pure-python-wheel-and-sdist:
+    name: Wheel py3-none-any and sdist
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout pending changes
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.safe-checkout || github.sha }}
+      - name: Build pure python wheel and sdist
+        run: |
+          set -e
+          curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64 \
+            -o "$RUNNER_TEMP/bazel"
+          chmod +x "$RUNNER_TEMP/bazel"
+          "$RUNNER_TEMP/bazel" build //python/dist:pure_python_wheel //python/dist:source_wheel
+          mkdir -p wheels
+          cp bazel-bin/python/dist/protobuf-*-py3-none-any.whl wheels/
+          cp bazel-bin/python/dist/protobuf-*.tar.gz wheels/
+          ls -l wheels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py3-none-any-and-sdist
+          path: wheels/
+          if-no-files-found: error

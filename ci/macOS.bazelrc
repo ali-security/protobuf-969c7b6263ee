@@ -4,7 +4,10 @@ build --cxxopt=-std=c++17 --host_cxxopt=-std=c++17
 build --cxxopt="-Woverloaded-virtual"
 build --copt="-Wpointer-arith"
 build --copt="-Werror" --copt="-Wno-sign-compare" --copt="-Wno-sign-conversion" --copt="-Wno-error=sign-conversion" --copt="-Wno-deprecated-declarations"
-common --xcode_version_config=@com_google_protobuf//.github:host_xcodes
+# The pinned //.github:host_xcodes config defaults to Xcode 14.2 (macos-13
+# runner image), which no current GitHub macOS runner ships; let Bazel
+# autodetect the runner's installed Xcode instead.
+# common --xcode_version_config=@com_google_protobuf//.github:host_xcodes
 
 build --apple_crosstool_top=@local_config_apple_cc//:toolchain
 build --crosstool_top=@local_config_apple_cc//:toolchain

@@ -1,9 +1,6 @@
 name: Auto-generate stale checked-in files
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions: {}

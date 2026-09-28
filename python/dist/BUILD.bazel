@@ -490,6 +490,22 @@ py_dist(
     tags = ["manual"],
 )
 
+# Upstream's :dist target narrowed to the single osx-universal2 leg that the fork
+# CI macOS job produces. Building through py_dist means python_version/limited_api
+# reach the build via the py_dist transition -- the configuration the public wheel
+# was built in -- instead of via command-line flags. The two paths differ in
+# bazel's output-directory fingerprint, which is recorded as the LC_ID_DYLIB of the
+# extension module, so only the transition reproduces the published wheel.
+py_dist(
+    name = "dist_osx_universal2",
+    binary_wheel = ":binary_wheel",
+    full_api_cpus = [],
+    full_api_versions = [],
+    limited_api_wheels = {"osx-universal2": "39"},
+    pure_python_wheel = ":pure_python_wheel",
+    tags = ["manual"],
+)
+
 # py_proto_library() is private rule, only intended for internal use by upb.
 # Hopefully py_proto_library() will eventually be available in rules_proto or
 # another upstream package.

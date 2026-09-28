@@ -5,8 +5,8 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 limited_api_build_file = """
 cc_library(
     name = "python_headers",
-    hdrs = glob(["**/Include/**/*.h"]),
-    strip_include_prefix = "Python-{}/Include",
+    hdrs = glob(["Python-{0}/Include/**/*.h"]),
+    strip_include_prefix = "Python-{0}/Include",
     visibility = ["//visibility:public"],
 )
 """
