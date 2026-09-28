@@ -1102,12 +1102,9 @@ static PyObject* PyUpb_RepeatedContainer_MergeFrom(PyObject* _self,
 // RepeatedCompositeContainer
 // -----------------------------------------------------------------------------
 
-static PyObject* PyUpb_RepeatedCompositeContainer_AppendNew(PyObject* _self) {
-  PyUpb_RepeatedContainer* self = (PyUpb_RepeatedContainer*)_self;
-  upb_Array* arr = PyUpb_RepeatedContainer_AssureWritable(_self);
-  if (!arr) return NULL;
+static PyObject* PyUpb_RepeatedCompositeContainer_NewMessage(
+    PyUpb_RepeatedContainer* self, upb_Arena* arena, upb_Message** msg_out) {
   const upb_FieldDef* f = PyUpb_RepeatedContainer_GetField(self);
-  upb_Arena* arena = PyUpb_Arena_Get(self->arena);
   const upb_MessageDef* m = upb_FieldDef_MessageSubDef(f);
   const upb_MiniTable* layout = upb_MessageDef_MiniTable(m);
   upb_Message* msg = upb_Message_New(layout, arena);
@@ -1115,11 +1112,7 @@ static PyObject* PyUpb_RepeatedCompositeContainer_AppendNew(PyObject* _self) {
     PyErr_SetNone(PyExc_MemoryError);
     return NULL;
   }
-  upb_MessageValue msgval = {.msg_val = msg};
-  if (!upb_Array_Append(arr, msgval, arena)) {
-    PyErr_SetNone(PyExc_MemoryError);
-    return NULL;
-  }
+  *msg_out = msg;
   return PyUpb_Message_Get(PyUpb_RepeatedContainer_GetPool(self), msg, m,
                            self->arena);
 }
@@ -1127,11 +1120,21 @@ static PyObject* PyUpb_RepeatedCompositeContainer_AppendNew(PyObject* _self) {
 PyObject* PyUpb_RepeatedCompositeContainer_Add(PyObject* _self, PyObject* args,
                                                PyObject* kwargs) {
   PyUpb_RepeatedContainer* self = (PyUpb_RepeatedContainer*)_self;
-  PyObject* py_msg = PyUpb_RepeatedCompositeContainer_AppendNew(_self);
+  upb_Array* arr = PyUpb_RepeatedContainer_AssureWritable(_self);
+  if (!arr) return NULL;
+  upb_Arena* arena = PyUpb_Arena_Get(self->arena);
+  upb_Message* msg;
+  PyObject* py_msg =
+      PyUpb_RepeatedCompositeContainer_NewMessage(self, arena, &msg);
   if (!py_msg) return NULL;
   if (PyUpb_Message_InitAttributes(py_msg, args, kwargs) < 0) {
     Py_DECREF(py_msg);
-    upb_Array_Delete(self->ptr.arr, upb_Array_Size(self->ptr.arr) - 1, 1);
+    return NULL;
+  }
+  upb_MessageValue msgval = {.msg_val = msg};
+  if (!upb_Array_Append(arr, msgval, arena)) {
+    Py_DECREF(py_msg);
+    PyErr_SetNone(PyExc_MemoryError);
     return NULL;
   }
   return py_msg;
@@ -1140,7 +1143,13 @@ PyObject* PyUpb_RepeatedCompositeContainer_Add(PyObject* _self, PyObject* args,
 static PyObject* PyUpb_RepeatedCompositeContainer_Append(PyObject* _self,
                                                          PyObject* value) {
   if (!PyUpb_Message_Verify(value)) return NULL;
-  PyObject* py_msg = PyUpb_RepeatedCompositeContainer_AppendNew(_self);
+  PyUpb_RepeatedContainer* self = (PyUpb_RepeatedContainer*)_self;
+  upb_Array* arr = PyUpb_RepeatedContainer_AssureWritable(_self);
+  if (!arr) return NULL;
+  upb_Arena* arena = PyUpb_Arena_Get(self->arena);
+  upb_Message* msg;
+  PyObject* py_msg =
+      PyUpb_RepeatedCompositeContainer_NewMessage(self, arena, &msg);
   if (!py_msg) return NULL;
   PyObject* none = PyUpb_Message_MergeFrom(py_msg, value);
   if (!none) {
@@ -1148,6 +1157,12 @@ static PyObject* PyUpb_RepeatedCompositeContainer_Append(PyObject* _self,
     return NULL;
   }
   Py_DECREF(none);
+  upb_MessageValue msgval = {.msg_val = msg};
+  if (!upb_Array_Append(arr, msgval, arena)) {
+    Py_DECREF(py_msg);
+    PyErr_SetNone(PyExc_MemoryError);
+    return NULL;
+  }
   return py_msg;
 }
 
@@ -1170,16 +1185,10 @@ static PyObject* PyUpb_RepeatedContainer_Insert(PyObject* _self,
   upb_MessageValue msgval;
   upb_Arena* arena = PyUpb_Arena_Get(self->arena);
   if (upb_FieldDef_IsSubMessage(f)) {
-    // Create message.
-    const upb_MessageDef* m = upb_FieldDef_MessageSubDef(f);
-    const upb_MiniTable* layout = upb_MessageDef_MiniTable(m);
-    upb_Message* msg = upb_Message_New(layout, arena);
-    if (!msg) {
-      PyErr_SetNone(PyExc_MemoryError);
-      return NULL;
-    }
-    PyObject* py_msg = PyUpb_Message_Get(PyUpb_RepeatedContainer_GetPool(self),
-                                         msg, m, self->arena);
+    upb_Message* msg;
+    PyObject* py_msg =
+        PyUpb_RepeatedCompositeContainer_NewMessage(self, arena, &msg);
+    if (!py_msg) return NULL;
     PyObject* ret = PyUpb_Message_MergeFrom(py_msg, value);
     Py_DECREF(py_msg);
     if (!ret) return NULL;
